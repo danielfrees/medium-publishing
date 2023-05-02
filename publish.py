@@ -1,20 +1,27 @@
 import requests
 import argparse
 import subprocess
+from dotenv import load_dotenv
+import os
+import markdown
+from bs4 import BeautifulSoup
 
 ### ADD MEDIUM INTEGRATION TOKEN HERE ###
-TOKEN = "" 
+load_dotenv()
+TOKEN = os.getenv('MEDIUM_TOKEN')
 
-headers = {
-    "Accept":	"text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Encoding"	:"gzip, deflate, br",
-    "Accept-Language"	:"en-US,en;q=0.5",
-    "Connection"	:"keep-alive",
-    "Host"	:"api.medium.com",
-    "Authorization": "Bearer {}".format(TOKEN),
-    "Upgrade-Insecure-Requests":	"1",
-    "User-Agent":	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0"
-}
+def get_headers(token):
+    headers = {
+        "Accept":	"text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Encoding"	:"gzip, deflate, br",
+        "Accept-Language"	:"en-US,en;q=0.5",
+        "Connection"	:"keep-alive",
+        "Host"	:"api.medium.com",
+        "Authorization": "Bearer {}".format(token),
+        "Upgrade-Insecure-Requests":	"1",
+        "User-Agent":	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0"
+    }
+    return headers
 
 def read_file(filepath):
     '''reads file from input filepath and returns a dict with the file content and contentFormat for the publish payload'''
@@ -42,23 +49,80 @@ def prep_data(args):
         data['publishStatus'] = args['pub']
     return data
 
-def get_author_id():
+def get_author_id(token):
     '''uses the /me medium api endpoint to get the user's author id'''
-    response = requests.get("https://api.medium.com/v1/me", headers=headers, params={"Authorization": "Bearer {}".format(TOKEN)})
+    response = requests.get("https://api.medium.com/v1/me", headers=get_headers(token), params={"Authorization": "Bearer {}".format(token)})
     if response.status_code == 200:
         return response.json()['data']['id']
+    else:
+        print(f"Get Author ID Error:")
+        print(response)
     return None
 
-def post_article(data):
-    '''posts an article to medium with the input payload'''
-    author_id = get_author_id()
-    url = "https://api.medium.com/v1/users/{}/posts".format(author_id)
-    response = requests.post(url, headers=headers, data=data)
+def extract_images(content: str):
+    """
+    Extract images
+    :param content: The post content
+    :return: A list of images
+    """
+    output = markdown.markdown(content)
+    soup = BeautifulSoup(output, "html.parser")
+    imgs_extracted_html = soup.find_all("img")
+    imgs_extracted_list = []
+    for image in imgs_extracted_html:
+        imgs_extracted_list.append(image['src'])
+    return imgs_extracted_list
+
+def publish_image(image_path,
+                  headers):
+    """
+    Publish a single image on the medium
+    :param image_path: Path of the image
+    :param headers: the medium headers
+    :return: The published path
+    """
+    # Open image
+    with open(image_path, "rb") as f:
+        filename = image_path.split(".")[0]
+        extension = image_path.split(".")[-1]
+        content_type = f"image/{extension}"
+        files = {"image": (filename, f, content_type)}
+        url = "https://api.medium.com/v1/images"
+        response = requests.request("post", url, headers=headers, files=files)
+        if 200 <= response.status_code < 300:
+            json = response.json()
+            try:
+                return json["data"]["url"]
+            except KeyError:
+                return json
+
+def post_article(data,
+                 base_path: str):
+    """
+    Posts an article to medium with the input payload
+    :param data: The content data in json
+    :param token: The medium token
+    :param base_path: the images base path
+    :return: Post Url
+    """
+    headers = get_headers(TOKEN)
+    images_path = extract_images(data["content"])
+    for image_path in images_path:
+        new_url = publish_image(f"{base_path}/{image_path}", headers)
+        if new_url is not None:
+            # Put the url instead of the original images
+            data["content"] = data["content"].replace(image_path, new_url)
+    author_id = get_author_id(TOKEN)
+    url = f"https://api.medium.com/v1/users/{author_id}/posts"
+    response = requests.request("post", url, headers=headers, json=data)
     if response.status_code in [200, 201]:
         response_json = response.json()
-        # get URL of uploaded post
-        pub_url = response_json["data"]["url"]
-        return pub_url
+        # get the URL of the uploaded post
+        medium_post_url = response_json["data"]["url"]
+        return medium_post_url
+    else:
+        print(response.status_code)
+        print(response)
     return None
 
 def copy_to_clipboard(to_copy):
@@ -81,8 +145,8 @@ if __name__ == "__main__":
 
     # read arguments
     args = parser.parse_args()
-
+    filepath = args.filepath
     data = prep_data(vars(args))
-    post_url = post_article(data)
+    post_url = post_article(data, base_path = "/".join(filepath.split("/")[:-1]))
     copy_to_clipboard(post_url) # copy url to clipboard if any
     print(post_url)
